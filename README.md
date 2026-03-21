@@ -11,6 +11,7 @@ It aggregates metadata, abstracts, DOI enrichment, and reading links across majo
 
 ## Live Demo
 - Web demo (Hugging Face Space): https://huggingface.co/spaces/Laibniz/ScholarFetch_Web
+- Public MCP streamable HTTP endpoint: https://laibniz-scholarfetch-web.hf.space/mcp/
 
 ## What It Does
 - Unified search across multiple engines in parallel
@@ -150,6 +151,7 @@ ScholarFetch includes an MCP server in this same repository.
   - `python3 scholarfetch_mcp.py --self-test`
   - `python3 scholarfetch_fastmcp.py --self-test`
 - Docs: [MCP_SERVER.md](./MCP_SERVER.md)
+- Public hosted MCP (free): `https://laibniz-scholarfetch-web.hf.space/mcp/`
 
 MCP tools do not accept API keys in arguments. Credentials are loaded server-side from environment (`.scholarfetch.env` / process env) and sent upstream as provider headers.
 
