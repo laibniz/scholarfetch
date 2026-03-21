@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scholarfetch"
+version = "0.1.0"
+description = "Multi-engine scholarly fetch CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "ScholarFetch contributors" }
+]
+keywords = ["scholar", "research", "cli", "openalex", "crossref", "elsevier", "springer", "arxiv"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Information Analysis"
+]
+
+[project.urls]
+Homepage = "https://github.com/laibniz/scholarfetch"
+Repository = "https://github.com/laibniz/scholarfetch"
+Issues = "https://github.com/laibniz/scholarfetch/issues"
+
+[project.scripts]
+scholarfetch = "scholarfetch_cli:main"
+scholarfetch-mcp = "scholarfetch_mcp:main"
+scholarfetch-fastmcp = "scholarfetch_fastmcp:main"
+
+[tool.setuptools]
+py-modules = ["scholarfetch_cli", "scholarfetch", "scholarfetch_mcp", "scholarfetch_fastmcp"]
