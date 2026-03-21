@@ -2,9 +2,15 @@
 
 ![ScholarFetch Logo](./assets/scholarfetch-logo.svg)
 
-ScholarFetch is a terminal-first, multi-engine scholarly fetcher.
+ScholarFetch is a multi-engine academic paper search and abstract retrieval toolkit with:
+- a terminal-first Python CLI
+- a classic MCP server (stdio)
+- a FastMCP server (`stdio`, `sse`, `streamable-http`)
 
-It aggregates metadata, abstracts, and reading links across multiple scholarly APIs with a single CLI workflow.
+It aggregates metadata, abstracts, DOI enrichment, and reading links across major scholarly APIs in one workflow.
+
+## Live Demo
+- Web demo (Hugging Face Space): https://huggingface.co/spaces/Laibniz/ScholarFetch_Web
 
 ## What It Does
 - Unified search across multiple engines in parallel
@@ -23,9 +29,16 @@ It aggregates metadata, abstracts, and reading links across multiple scholarly A
 - Springer Nature (Metadata API + Open Access API)
 - Semantic Scholar (DOI enrichment path)
 
+## Why ScholarFetch
+- Research API aggregation: one interface over multiple scholarly databases
+- Better recall: parallel retrieval + deduplication across providers
+- Better precision: DOI-first retrieval and author disambiguation workflow
+- Agent-ready: MCP tools for LLM systems and automation pipelines
+
 ## Installation
 ```bash
-cd /home/andrea/VibeCodes/elsevier
+git clone https://github.com/laibniz/scholarfetch.git
+cd scholarfetch
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -46,7 +59,7 @@ python3 scholarfetch.py
 
 If your environment is offline/restricted and `pip install -e .` fails, use:
 ```bash
-python setup.py develop
+python3 setup.py develop
 scholarfetch
 ```
 
@@ -68,7 +81,7 @@ Notes:
 
 ## Quick Start Workflow
 ```text
-/author andrea de mauro
+/author Albert Einstein
 /papers 1
 /abstract 1
 ```
@@ -83,6 +96,21 @@ Notes:
 - `/article <doi>`
 - `/engines`
 - `/config`
+
+## Common Research Flows
+```text
+# topic search
+/search graph neural networks
+
+# author investigation
+/author Albert Einstein
+/papers 1 year>=2018 has:abstract
+/abstract 1
+
+# DOI enrichment
+/doi 10.1007/s43039-022-00057-w
+/article 10.1007/s43039-022-00057-w
+```
 
 ## Paper Filters
 Use with `/papers`:
@@ -135,6 +163,34 @@ MCP tools do not accept API keys in arguments. Credentials are loaded server-sid
 - `CONTRIBUTING.md`: contributor guide
 - `CODE_OF_CONDUCT.md`: community standards
 - `SECURITY.md`: vulnerability reporting process
+
+## Discovery Keywords
+Academic search API, paper metadata API, abstract retrieval API, DOI lookup tool, OpenAlex API client, Crossref API search, Elsevier Scopus API CLI, Springer Nature Metadata API integration, Europe PMC search, arXiv paper search, Semantic Scholar enrichment, MCP server for research, FastMCP scholarly tools, Python research automation, literature review tooling.
+
+## Project Profile
+- Primary entity: `ScholarFetch`
+- Category: `Multi-engine scholarly search CLI + MCP server`
+- Core intents:
+  - Find papers by keyword, author, DOI
+  - Retrieve and rank abstracts across providers
+  - Export structured research results
+  - Integrate scholarly retrieval tools in LLM agents via MCP
+- Canonical links:
+  - GitHub repo: `https://github.com/laibniz/scholarfetch`
+  - Live web demo: `https://huggingface.co/spaces/Laibniz/ScholarFetch_Web`
+
+## FAQ
+- Why are some abstracts missing?
+Provider entitlements differ. ScholarFetch ranks and falls back across engines, but access still depends on source availability and licensing.
+
+- Can I force a single engine?
+Yes, via CLI (`/config only <engine>`) or MCP tool argument (`engines` subset).
+
+- Can I use it with Langflow or other agent builders?
+Yes. Use `scholarfetch_mcp.py` or `scholarfetch_fastmcp.py`. See [MCP_SERVER.md](./MCP_SERVER.md).
+
+- Is there a web UI?
+Yes, the Space demo is available at https://huggingface.co/spaces/Laibniz/ScholarFetch_Web.
 
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
