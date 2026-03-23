@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """ScholarFetch MCP server powered by FastMCP."""
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os
