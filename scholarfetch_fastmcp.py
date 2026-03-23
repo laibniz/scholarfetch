@@ -4,21 +4,42 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import ClientDisconnect
 
 from scholarfetch_mcp import ScholarFetchService
 
 
 SERVICE: Optional[ScholarFetchService] = None
 
+ENGINE_LIST = "elsevier, openalex, crossref, arxiv, europepmc, springer, semanticscholar"
 
-TOOL_NOTE = (
-    "Credentials are loaded server-side from environment (.scholarfetch.env by default). "
-    "Do not pass API keys as tool arguments."
-)
+
+class _IgnoreClientDisconnectFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info:
+            exc = record.exc_info[1]
+            if isinstance(exc, ClientDisconnect):
+                return False
+        message = ""
+        try:
+            message = record.getMessage()
+        except Exception:
+            pass
+        if "Received exception from stream" in message:
+            return False
+        return True
+
+
+def _configure_logging() -> None:
+    filt = _IgnoreClientDisconnectFilter()
+    for logger_name in ("mcp.server.streamable_http", "mcp.server.lowlevel.server"):
+        logger = logging.getLogger(logger_name)
+        logger.addFilter(filt)
 
 
 def _load_local_env() -> None:
@@ -51,8 +72,8 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     mcp = FastMCP(
         name="ScholarFetch FastMCP",
         instructions=(
-            "Multi-engine scholarly fetch server. Use tools for search, DOI enrichment, "
-            "author disambiguation, deduplicated papers, and abstract retrieval."
+            "Multi-engine scholarly research server. Use it to traverse from keyword -> paper -> author -> paper -> references, "
+            "save interesting papers into an in-memory reading list, and export citations/abstracts/full-text corpora for downstream synthesis."
         ),
         host=host,
         port=port,
@@ -62,9 +83,9 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool(
         name="scholarfetch_search",
         description=(
-            "Unified scholarly search across enabled engines. Supports keyword, DOI, and person-name query routing. "
-            "Parameter `engines` is a comma-separated list (e.g. 'openalex,crossref,springer'). "
-            + TOOL_NOTE
+            "Start a research traversal from keywords, a DOI, or a person name. "
+            "Returns deduplicated paper records that you can inspect, save, expand through references, or use as seeds for author exploration. "
+            f"If you pass `engines`, use a comma-separated subset of: {ENGINE_LIST}."
         ),
     )
     def scholarfetch_search(
@@ -83,9 +104,8 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool(
         name="scholarfetch_doi_lookup",
         description=(
-            "Cross-engine DOI enrichment. Returns metadata, abstract availability, and links. "
-            "Parameter `engines` is a comma-separated list. "
-            + TOOL_NOTE
+            "Enrich one known DOI with metadata, reading links, and full-text availability signals. "
+            f"If you pass `engines`, use a comma-separated subset of: {ENGINE_LIST}."
         ),
     )
     def scholarfetch_doi_lookup(
@@ -102,9 +122,9 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool(
         name="scholarfetch_author_candidates",
         description=(
-            "Resolve and rank author candidates (OpenAlex-based) for identity disambiguation. "
-            "Parameter `engines` is comma-separated and must include openalex. "
-            + TOOL_NOTE
+            "Disambiguate a human author name into ranked identity candidates. "
+            "Use this before `scholarfetch_author_papers` when the name is ambiguous and you need a stable `candidate_index`. "
+            "If you pass `engines`, it must include `openalex`."
         ),
     )
     def scholarfetch_author_candidates(
@@ -123,10 +143,10 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool(
         name="scholarfetch_author_papers",
         description=(
-            "Fetch deduplicated papers for a selected author using author_id OR author_name + candidate_index. "
-            "Use comma-separated `filters` (e.g. 'year>=2020,has:abstract,venue:marketing'). "
-            "Parameter `engines` is comma-separated and must include openalex. "
-            + TOOL_NOTE
+            "Expand one author into a deduplicated paper list. This is the main author->paper traversal tool and supports research filters. "
+            "Use `author_id` when you already know the exact author, or `author_name` plus `candidate_index` after `scholarfetch_author_candidates`. "
+            "Supported comma-separated `filters`: year>=YYYY, year<=YYYY, year=YYYY, has:abstract, has:doi, has:pdf, venue:<text>, title:<text>, doi:<text>. "
+            "If you pass `engines`, it must include `openalex`."
         ),
     )
     def scholarfetch_author_papers(
@@ -151,9 +171,8 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool(
         name="scholarfetch_abstract",
         description=(
-            "Retrieve best abstract by DOI OR via author flow (author_name + candidate_index + paper_index). "
-            "Parameter `engines` is a comma-separated list. "
-            + TOOL_NOTE
+            "Read the best abstract available for a paper. Use with a DOI or with author_name + candidate_index + paper_index after author_papers. "
+            f"If you pass `engines`, use a comma-separated subset of: {ENGINE_LIST}."
         ),
     )
     def scholarfetch_abstract(
@@ -169,6 +188,145 @@ def build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 "author_name": author_name,
                 "candidate_index": candidate_index,
                 "paper_index": paper_index,
+                "engines": engines,
+            }
+        )
+
+    @mcp.tool(
+        name="scholarfetch_article_text",
+        description=(
+            "Read full paper text when machine-readable content is recoverable. Use with a DOI or with author_name + candidate_index + paper_index. "
+            "Uses Elsevier first, then open-access fallbacks such as Springer OA, Europe PMC, arXiv PDF, and generic PDF URLs when text is recoverable. "
+            f"If you pass `engines`, use a comma-separated subset of: {ENGINE_LIST}."
+        ),
+    )
+    def scholarfetch_article_text(
+        doi: Optional[str] = None,
+        author_name: Optional[str] = None,
+        candidate_index: int = 1,
+        paper_index: int = 1,
+        engines: str = "",
+    ) -> Dict[str, Any]:
+        return _service().article_text(
+            {
+                "doi": doi,
+                "author_name": author_name,
+                "candidate_index": candidate_index,
+                "paper_index": paper_index,
+                "engines": engines,
+            }
+        )
+
+    @mcp.tool(
+        name="scholarfetch_references",
+        description=(
+            "Expand a paper into its references. Use with a DOI or with author_name + candidate_index + paper_index. "
+            "This is the main edge-expansion tool for traversing the literature graph. "
+            f"If you pass `engines`, use a comma-separated subset of: {ENGINE_LIST}."
+        ),
+    )
+    def scholarfetch_references(
+        doi: Optional[str] = None,
+        author_name: Optional[str] = None,
+        candidate_index: int = 1,
+        paper_index: int = 1,
+        engines: str = "",
+    ) -> Dict[str, Any]:
+        return _service().references(
+            {
+                "doi": doi,
+                "author_name": author_name,
+                "candidate_index": candidate_index,
+                "paper_index": paper_index,
+                "engines": engines,
+            }
+        )
+
+    @mcp.tool(
+        name="scholarfetch_saved_add",
+        description=(
+            "Add one paper to a named in-memory reading list on the MCP server. Best input is paper_json copied from another ScholarFetch tool result, "
+            "but DOI, query+result_index, or author_name+candidate_index+paper_index also work. Reuse the same collection name across calls to keep one research session together."
+        ),
+    )
+    def scholarfetch_saved_add(
+        collection: str = "default",
+        paper_json: Optional[str] = None,
+        doi: Optional[str] = None,
+        query: Optional[str] = None,
+        result_index: int = 1,
+        author_name: Optional[str] = None,
+        candidate_index: int = 1,
+        paper_index: int = 1,
+        engines: str = "",
+    ) -> Dict[str, Any]:
+        return _service().saved_add(
+            {
+                "collection": collection,
+                "paper_json": paper_json,
+                "doi": doi,
+                "query": query,
+                "result_index": result_index,
+                "author_name": author_name,
+                "candidate_index": candidate_index,
+                "paper_index": paper_index,
+                "engines": engines,
+            }
+        )
+
+    @mcp.tool(
+        name="scholarfetch_saved_list",
+        description=(
+            "List all papers currently saved in a named in-memory reading list. Use this to inspect the working set before exporting or removing items."
+        ),
+    )
+    def scholarfetch_saved_list(collection: str = "default") -> Dict[str, Any]:
+        return _service().saved_list({"collection": collection})
+
+    @mcp.tool(
+        name="scholarfetch_saved_remove",
+        description=(
+            "Remove one paper from a named in-memory reading list by DOI or exact title."
+        ),
+    )
+    def scholarfetch_saved_remove(
+        collection: str = "default",
+        doi: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return _service().saved_remove({"collection": collection, "doi": doi, "title": title})
+
+    @mcp.tool(
+        name="scholarfetch_saved_clear",
+        description=(
+            "Clear all papers from a named in-memory reading list. Useful when restarting a research branch."
+        ),
+    )
+    def scholarfetch_saved_clear(collection: str = "default") -> Dict[str, Any]:
+        return _service().saved_clear({"collection": collection})
+
+    @mcp.tool(
+        name="scholarfetch_saved_export",
+        description=(
+            "Export the current reading list as citations, abstracts, BibTeX, or an aggregated full-text corpus. "
+            "Valid `format` values: citations, abstracts, bib, fulltext. "
+            "Valid `style` values when `format=citations`: harvard, apa, ieee. "
+            "Use `include_references=true` with `format=fulltext` when you want a richer downstream synthesis corpus."
+        ),
+    )
+    def scholarfetch_saved_export(
+        collection: str = "default",
+        format: str = "citations",
+        style: str = "harvard",
+        include_references: bool = False,
+        engines: str = "",
+    ) -> Dict[str, Any]:
+        return _service().saved_export(
+            {
+                "collection": collection,
+                "format": format,
+                "style": style,
+                "include_references": include_references,
                 "engines": engines,
             }
         )
@@ -189,6 +347,7 @@ def self_test() -> None:
 
 def main() -> None:
     _load_local_env()
+    _configure_logging()
     parser = argparse.ArgumentParser(description="ScholarFetch FastMCP server")
     parser.add_argument("--self-test", action="store_true", help="Run local self-test and exit")
     parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], default="stdio")

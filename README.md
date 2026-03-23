@@ -2,39 +2,36 @@
 
 ![ScholarFetch Logo](./assets/scholarfetch-logo.svg)
 
-ScholarFetch is a multi-engine academic paper search and abstract retrieval toolkit with:
-- a terminal-first Python CLI
+ScholarFetch is a multi-engine academic research environment for:
+- terminal-first literature exploration
+- MCP-powered agent workflows
+- building curated reading lists and exportable research corpora
+
+It combines:
+- a rich interactive CLI for humans
 - a classic MCP server (stdio)
 - a FastMCP server (`stdio`, `sse`, `streamable-http`)
 
-It aggregates metadata, abstracts, DOI enrichment, and reading links across major scholarly APIs in one workflow.
+The core idea is simple: start from keywords, DOI, or authors, traverse papers and references, inspect abstracts and full text, save what matters, then export a compact corpus for synthesis.
 
-## Live Demo
-- Web demo (Hugging Face Space): https://huggingface.co/spaces/Laibniz/ScholarFetch_Web
-- Public MCP streamable HTTP endpoint: https://laibniz-scholarfetch-web.hf.space/mcp/
-
-## What It Does
-- Unified search across multiple engines in parallel
-- Author investigation workflow with ranked candidates and deduplicated papers
-- DOI lookup with cross-engine enrichment
-- Abstract retrieval with fallback/ranking across sources
-- Article/read-link discovery (including PDF links when available)
-- Engine selection/configuration from CLI
+## What ScholarFetch Does
+- Searches across multiple scholarly engines in parallel
+- Resolves ambiguous author identities and expands author paper lists
+- Traverses references as first-class research nodes
+- Retrieves abstracts and machine-readable full text when available
+- Tracks a saved paper set during an interactive research session
+- Exports citations, abstracts, BibTeX, or full-text corpora
+- Exposes the same research workflow to MCP agents
+- Maintains stateful saved-paper collections inside one MCP session
 
 ## Engines
-- Elsevier (Scopus/Abstract/Article APIs)
+- Elsevier (Scopus / Abstract / Article retrieval)
 - OpenAlex
 - Crossref
 - arXiv
 - Europe PMC
-- Springer Nature (Metadata API + Open Access API)
+- Springer Nature (metadata + open access)
 - Semantic Scholar (DOI enrichment path)
-
-## Why ScholarFetch
-- Research API aggregation: one interface over multiple scholarly databases
-- Better recall: parallel retrieval + deduplication across providers
-- Better precision: DOI-first retrieval and author disambiguation workflow
-- Agent-ready: MCP tools for LLM systems and automation pipelines
 
 ## Installation
 ```bash
@@ -46,29 +43,23 @@ pip install -e .
 scholarfetch
 ```
 
-No external Python packages are required.
-
-Installed console scripts:
+Console scripts:
 - `scholarfetch`
 - `scholarfetch-mcp`
 - `scholarfetch-fastmcp`
 
-Alternative (without installation):
+Alternative:
 ```bash
 python3 scholarfetch.py
 ```
 
-If your environment is offline/restricted and `pip install -e .` fails, use:
-```bash
-python3 setup.py develop
-scholarfetch
-```
-
 ## Credentials
-The CLI auto-loads credentials from:
-1. `SCHOLARFETCH_ENV_FILE` (default: `.scholarfetch.env`)
+ScholarFetch loads provider credentials server-side / client-side from environment.
 
-Example `.scholarfetch.env`:
+Default env file:
+- `.scholarfetch.env`
+
+Typical variables:
 ```bash
 ELSEVIER_API_KEY=...
 ELSEVIER_INSTTOKEN=...
@@ -77,122 +68,160 @@ SPRINGER_OPENACCESS_API_KEY=...
 ```
 
 Notes:
-- `ELSEVIER_INSTTOKEN` is optional; the client retries without it when needed.
-- Some endpoints/views are entitlement-restricted by providers.
+- `ELSEVIER_INSTTOKEN` is optional
+- provider entitlements and rate limits still apply
+- MCP tools do not accept API keys in tool arguments
 
-## Quick Start Workflow
+## CLI Research Workflow
+ScholarFetch CLI is designed for research traversal.
+
+Typical flow:
+1. Start from a topic, DOI, or author.
+2. Inspect papers.
+3. Read abstracts or full text.
+4. Expand references.
+5. Jump to related authors.
+6. Save promising papers.
+7. Export a corpus for downstream work.
+
+Example:
 ```text
+/search graph neural networks
 /author Albert Einstein
-/papers 1
-/abstract 1
+/papers 1 has:abstract
+/article 1
+/refs 1
+/saved
+/export fulltext dummy corpus.txt
 ```
 
-## Core Commands
+## CLI Features
+- Interactive picker with tree navigation
+- Breadcrumbs for current research position
+- Action bar for `OPEN`, `ABSTRACT`, `TEXT`, `REFS`, and `AUTHOR`
+- `Backspace` to go to parent node
+- `Esc` to return to prompt
+- `S` to save a paper from paper lists or reference lists
+- `X` to remove from the saved list
+- `AUTHOR` action from a paper now lets you select:
+  - a single author
+  - `ALL AUTHORS`
+- Reference lists behave like paper lists:
+  - `open`
+  - `abstract`
+  - `text`
+  - `refs`
+  - `author`
+- Automatic paper availability hints:
+  - abstract availability
+  - full-text availability
+- Progress feedback for expensive transitions
+- Interruptible reference preview building with partial results kept
+
+## Core CLI Commands
 - `/search <keywords|doi|person name>`
 - `/author <name>`
 - `/papers <author name|index> [filters]`
-- `/open <index>`
 - `/doi <doi>`
+- `/open <index>`
 - `/abstract <doi|index>`
-- `/article <doi>`
-- `/engines`
+- `/article <doi|index>`
+- `/refs <doi|index>`
+- `/ref <index>`
+- `/saved`
+- `/export [format style path ...]`
+- `/import [path]`
+- `/pick [mode]`
 - `/config`
-
-## Common Research Flows
-```text
-# topic search
-/search graph neural networks
-
-# author investigation
-/author Albert Einstein
-/papers 1 year>=2018 has:abstract
-/abstract 1
-
-# DOI enrichment
-/doi 10.1007/s43039-022-00057-w
-/article 10.1007/s43039-022-00057-w
-```
+- `/engines`
+- `/help`
 
 ## Paper Filters
 Use with `/papers`:
 - `year>=YYYY`, `year<=YYYY`, `year=YYYY`
-- `has:abstract`, `has:doi`, `has:pdf`
+- `has:abstract`, `has:doi`, `has:pdf`, `has:fulltext`
 - `venue:<text>`, `title:<text>`, `doi:<text>`
 
 Examples:
 ```text
-/papers 1 year>=2018 has:abstract
+/papers 1 year>=2020 has:abstract
+/papers 1 has:fulltext
 /papers andrea de mauro venue:marketing
 ```
 
-## Engine Configuration
-- `/config` (show current state + help)
-- `/config only springer`
-- `/config only openalex,elsevier`
-- `/config add arxiv`
-- `/config remove crossref`
-- `/config reset`
-- `/config save` (persists to `.scholarfetch_settings.json`)
+## Export Modes
+ScholarFetch supports four export modes from the saved paper set.
 
-Springer note:
-- In `only springer` mode, non-DOI keyword/person search may return no results due to Springer premium restrictions on generic search.
-- DOI-driven commands work (`/doi <doi>`, `/search <doi>`, `/abstract <doi|index>`).
+- `bib`
+  - BibTeX for citation managers and bibliographic tooling
+- `citations`
+  - citation-only export in `harvard`, `apa`, or `ieee`
+- `abstracts`
+  - metadata + abstract for each saved paper
+- `fulltext`
+  - metadata + abstract + full text when available
+  - optional inclusion of references
 
+This makes ScholarFetch useful as a corpus builder for downstream synthesis agents.
 
 ## MCP Server
-ScholarFetch includes an MCP server in this same repository.
+ScholarFetch exposes the same research model through MCP.
 
+Modes:
 - Classic MCP (stdio): `python3 scholarfetch_mcp.py`
-- FastMCP:
-  - stdio: `python3 scholarfetch_fastmcp.py --transport stdio`
-  - SSE: `python3 scholarfetch_fastmcp.py --transport sse --host 127.0.0.1 --port 8000`
-  - Streamable HTTP: `python3 scholarfetch_fastmcp.py --transport streamable-http --host 127.0.0.1 --port 8000 --http-path /mcp`
-- Local tests:
-  - `python3 scholarfetch_mcp.py --self-test`
-  - `python3 scholarfetch_fastmcp.py --self-test`
-- Docs: [MCP_SERVER.md](./MCP_SERVER.md)
-- Public hosted MCP (free): `https://laibniz-scholarfetch-web.hf.space/mcp/`
+- FastMCP stdio: `python3 scholarfetch_fastmcp.py --transport stdio`
+- FastMCP SSE: `python3 scholarfetch_fastmcp.py --transport sse --host 127.0.0.1 --port 8000`
+- FastMCP streamable HTTP: `python3 scholarfetch_fastmcp.py --transport streamable-http --host 127.0.0.1 --port 8000 --http-path /mcp`
 
-MCP tools do not accept API keys in arguments. Credentials are loaded server-side from environment (`.scholarfetch.env` / process env) and sent upstream as provider headers.
+Validation:
+```bash
+python3 scholarfetch_mcp.py --self-test
+python3 scholarfetch_fastmcp.py --self-test
+```
 
-## Repository Structure
-- `scholarfetch.py`: main CLI entrypoint
-- `scholarfetch_cli.py`: core CLI + engine integrations
-- `scholarfetch_mcp.py`: MCP server entrypoint
-- `scholarfetch_fastmcp.py`: FastMCP server entrypoint (`stdio`, `sse`, `streamable-http`)
-- `MCP_SERVER.md`: MCP tool docs and integration notes
-- `README.md`: project docs
-- `CONTRIBUTING.md`: contributor guide
-- `CODE_OF_CONDUCT.md`: community standards
-- `SECURITY.md`: vulnerability reporting process
+Public demo endpoints:
+- Web UI: https://huggingface.co/spaces/Laibniz/ScholarFetch_Web
+- Public MCP endpoint: https://laibniz-scholarfetch-web.hf.space/mcp/
+- MCP Registry listing: `io.github.laibniz/scholarfetch`
 
-## Discovery Keywords
-Academic search API, paper metadata API, abstract retrieval API, DOI lookup tool, OpenAlex API client, Crossref API search, Elsevier Scopus API CLI, Springer Nature Metadata API integration, Europe PMC search, arXiv paper search, Semantic Scholar enrichment, MCP server for research, FastMCP scholarly tools, Python research automation, literature review tooling.
+## MCP Research Model
+The MCP server is designed for agent workflows, not only one-off calls.
 
-## Project Profile
-- Primary entity: `ScholarFetch`
-- Category: `Multi-engine scholarly search CLI + MCP server`
-- Core intents:
-  - Find papers by keyword, author, DOI
-  - Retrieve and rank abstracts across providers
-  - Export structured research results
-  - Integrate scholarly retrieval tools in LLM agents via MCP
-- Canonical links:
-  - GitHub repo: `https://github.com/laibniz/scholarfetch`
-  - Live web demo: `https://huggingface.co/spaces/Laibniz/ScholarFetch_Web`
+An agent can:
+1. Search papers
+2. Resolve authors
+3. Expand to author papers
+4. Read abstracts / full text
+5. Expand references
+6. Save promising papers into a named in-memory reading list
+7. Export the reading list as:
+   - citations
+   - abstracts
+   - BibTeX
+   - full-text corpus
 
-## FAQ
-- Why are some abstracts missing?
-Provider entitlements differ. ScholarFetch ranks and falls back across engines, but access still depends on source availability and licensing.
+This lets an agent build a focused research set inside one MCP session and then hand off an export artifact to another synthesis step.
 
-- Can I force a single engine?
-Yes, via CLI (`/config only <engine>`) or MCP tool argument (`engines` subset).
+See [MCP_SERVER.md](./MCP_SERVER.md) for the detailed tool model.
 
-- Can I use it with Langflow or other agent builders?
-Yes. Use `scholarfetch_mcp.py` or `scholarfetch_fastmcp.py`. See [MCP_SERVER.md](./MCP_SERVER.md).
+## Repository Files
+- `scholarfetch.py`: CLI entrypoint
+- `scholarfetch_cli.py`: core CLI + retrieval logic
+- `scholarfetch_mcp.py`: classic MCP server
+- `scholarfetch_fastmcp.py`: FastMCP server
+- `MCP_SERVER.md`: MCP usage guide
+- `AGENTS.md`: agent-facing workflow guide
+- `SKILL.md`: structured research skill guide
+- `SKILLS.md`: index for agent-facing skill docs
+- `CONTRIBUTING.md`: contributor notes
 
-- Is there a web UI?
-Yes, the Space demo is available at https://huggingface.co/spaces/Laibniz/ScholarFetch_Web.
+## For Agents
+If you are running ScholarFetch from an MCP-compatible system, read:
+- [AGENTS.md](./AGENTS.md)
+- [SKILL.md](./SKILL.md)
+- [SKILLS.md](./SKILLS.md)
+
+These documents explain how to use ScholarFetch as a literature-research environment rather than as a flat search API.
 
 ## Contributing
 See [CONTRIBUTING.md](./CONTRIBUTING.md).

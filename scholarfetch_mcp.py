@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-from scholarfetch_cli import ElsevierClient, RetroCLI
+from scholarfetch_cli import ElsevierClient, RetroCLI, UnifiedRecord
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -42,8 +42,26 @@ def _parse_csv_list(value: Any) -> List[str]:
 
 
 class ScholarFetchService:
+    def __init__(self) -> None:
+        self.saved_collections: Dict[str, List[Dict[str, Any]]] = {}
+
     def _effective_env(self) -> Dict[str, str]:
         env = dict(os.environ)
+        env_file = env.get("SCHOLARFETCH_ENV_FILE", ".scholarfetch.env")
+        if os.path.exists(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, value = line.split("=", 1)
+                        key = key.strip()
+                        value = value.strip().strip("'").strip('"')
+                        if key and key not in env:
+                            env[key] = value
+            except Exception:
+                pass
         return env
 
     def _runtime(self, engines: Optional[List[str]]) -> RetroCLI:
@@ -66,6 +84,81 @@ class ScholarFetchService:
             if picked:
                 cli.enabled_engines = picked
         return cli
+
+    @staticmethod
+    def _collection_name(raw: Any) -> str:
+        name = str(raw or "default").strip()
+        return name or "default"
+
+    def _get_collection(self, name: str) -> List[Dict[str, Any]]:
+        key = self._collection_name(name)
+        return self.saved_collections.setdefault(key, [])
+
+    @staticmethod
+    def _record_key(payload: Dict[str, Any]) -> str:
+        doi = str(payload.get("doi") or "").strip().lower()
+        if doi:
+            return doi
+        return str(payload.get("title") or payload.get("raw_id") or "").strip().lower()
+
+    def _select_best_record(self, cli: RetroCLI, rows: List[Any]) -> Optional[Dict[str, Any]]:
+        records = [r for r in rows if r]
+        if not records:
+            return None
+        records = cli._dedupe_records(records)
+        cli._prefetch_fulltext_status(records, limit=min(12, len(records)))
+        records.sort(
+            key=lambda r: (
+                cli._fulltext_rank(r),
+                0 if (r.abstract or "").strip() else 1,
+                -cli._record_year_int(r),
+                (r.title or "").lower(),
+            )
+        )
+        best = records[0]
+        return best.__dict__
+
+    def _resolve_record_payload(self, cli: RetroCLI, args: Dict[str, Any]) -> Dict[str, Any]:
+        paper_json = args.get("paper_json")
+        if isinstance(paper_json, str) and paper_json.strip():
+            payload = json.loads(paper_json)
+            if not isinstance(payload, dict):
+                raise ValueError("paper_json must decode to an object")
+            return payload
+
+        doi = (args.get("doi") or "").strip()
+        if doi:
+            payload = self._select_best_record(cli, cli._parallel_doi_lookup(doi))
+            if payload:
+                return payload
+            return {"title": doi, "doi": doi, "year": "", "authors": "", "venue": "", "abstract": "", "url": "", "pdf_url": "", "engine": "", "raw_id": doi}
+
+        query = (args.get("query") or "").strip()
+        if query:
+            result_index = _safe_int(args.get("result_index", 1), 1, 1, 1000) - 1
+            rows = cli._parallel_doi_lookup(query) if cli._looks_like_doi(query) else cli._parallel_search(query, limit_per_engine=6)
+            rows = cli._dedupe_records(rows)
+            if result_index >= len(rows):
+                raise ValueError("result_index out of range")
+            return rows[result_index].__dict__
+
+        author_name = (args.get("author_name") or "").strip()
+        if author_name:
+            candidate_index = _safe_int(args.get("candidate_index", 1), 1, 1, 100) - 1
+            paper_index = _safe_int(args.get("paper_index", 1), 1, 1, 1000) - 1
+            cands = cli._openalex_author_candidates(author_name, per_page=25)
+            if not cands:
+                raise ValueError("author_name did not resolve to any author candidate")
+            if candidate_index >= len(cands):
+                raise ValueError("candidate_index out of range")
+            papers = cli._openalex_works_for_author(cands[candidate_index]["author_id"], max_results=200)
+            papers = cli._dedupe_records(papers)
+            papers.sort(key=lambda r: (0 if (r.abstract or "").strip() else 1, -cli._record_year_int(r), (r.title or "").lower()))
+            if paper_index >= len(papers):
+                raise ValueError("paper_index out of range")
+            return papers[paper_index].__dict__
+
+        raise ValueError("Provide one of: paper_json, doi, query+result_index, or author_name+candidate_index+paper_index")
 
     def search(self, args: Dict[str, Any]) -> Dict[str, Any]:
         query = (args.get("query") or "").strip()
@@ -101,9 +194,11 @@ class ScholarFetchService:
         engines = _parse_csv_list(args.get("engines"))
         cli = self._runtime(engines)
         rows = cli._parallel_doi_lookup(doi)
+        fulltext_status = cli._elsevier_article_entitlement(doi)
         return {
             "doi": doi,
             "engines_used": cli.enabled_engines,
+            "elsevier_fulltext_status": fulltext_status,
             "count": len(rows),
             "results": [r.__dict__ for r in rows],
         }
@@ -234,49 +329,323 @@ class ScholarFetchService:
             "abstract": "",
         }
 
+    def article_text(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        engines = _parse_csv_list(args.get("engines"))
+        cli = self._runtime(engines)
+
+        doi = (args.get("doi") or "").strip()
+        if not doi:
+            author_name = (args.get("author_name") or "").strip()
+            candidate_index = _safe_int(args.get("candidate_index", 1), 1, 1, 100)
+            paper_index = _safe_int(args.get("paper_index", 1), 1, 1, 1000)
+            if not author_name:
+                raise ValueError("doi or author_name is required")
+
+            cands = cli._openalex_author_candidates(author_name, per_page=25)
+            if not cands:
+                return {"author_name": author_name, "found": False, "article_text": ""}
+            cidx = candidate_index - 1
+            if cidx >= len(cands):
+                raise ValueError("candidate_index out of range")
+            author_id = cands[cidx]["author_id"]
+            papers = cli._openalex_works_for_author(author_id, max_results=200)
+            papers = cli._dedupe_records(papers)
+            papers.sort(key=lambda r: (0 if r.abstract else 1, -cli._record_year_int(r), (r.title or "").lower()))
+            pidx = paper_index - 1
+            if pidx >= len(papers):
+                raise ValueError("paper_index out of range")
+            rec = papers[pidx]
+            doi = rec.doi or ""
+            if not doi:
+                if rec.engine == "arxiv":
+                    resolved = cli._resolve_fulltext("", seed_record=rec)
+                    return {
+                        "author_name": author_name,
+                        "candidate_index": candidate_index,
+                        "paper_index": paper_index,
+                        "title": rec.title,
+                        "found": bool(resolved.get("found")),
+                        "engine": resolved.get("engine", ""),
+                        "source": resolved.get("source", ""),
+                        "elsevier_fulltext_status": resolved.get("elsevier_fulltext_status", "UNKNOWN"),
+                        "article_text": resolved.get("text", ""),
+                    }
+                return {
+                    "author_name": author_name,
+                    "candidate_index": candidate_index,
+                    "paper_index": paper_index,
+                    "title": rec.title,
+                    "found": False,
+                    "article_text": "",
+                }
+
+        resolved = cli._resolve_fulltext(doi)
+        if not resolved.get("found"):
+            return {
+                "doi": doi,
+                "found": False,
+                "title": resolved.get("title") or doi,
+                "engine": resolved.get("engine", ""),
+                "source": resolved.get("source", ""),
+                "elsevier_fulltext_status": resolved.get("elsevier_fulltext_status"),
+                "article_text": "",
+                "results": [r.__dict__ for r in (resolved.get("results") or [])],
+            }
+
+        return {
+            "doi": doi,
+            "found": True,
+            "engine": resolved.get("engine", ""),
+            "source": resolved.get("source", ""),
+            "title": resolved.get("title") or doi,
+            "elsevier_fulltext_status": resolved.get("elsevier_fulltext_status"),
+            "article_text": resolved.get("text", ""),
+        }
+
+    def references(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        engines = _parse_csv_list(args.get("engines"))
+        cli = self._runtime(engines)
+
+        doi = (args.get("doi") or "").strip()
+        if not doi:
+            author_name = (args.get("author_name") or "").strip()
+            candidate_index = _safe_int(args.get("candidate_index", 1), 1, 1, 100)
+            paper_index = _safe_int(args.get("paper_index", 1), 1, 1, 1000)
+            if not author_name:
+                raise ValueError("doi or author_name is required")
+            cands = cli._openalex_author_candidates(author_name, per_page=25)
+            if not cands:
+                return {"author_name": author_name, "count": 0, "references": []}
+            cidx = candidate_index - 1
+            if cidx >= len(cands):
+                raise ValueError("candidate_index out of range")
+            papers = cli._openalex_works_for_author(cands[cidx]["author_id"], max_results=200)
+            papers = cli._dedupe_records(papers)
+            papers.sort(key=lambda r: (0 if r.abstract else 1, -cli._record_year_int(r), (r.title or "").lower()))
+            pidx = paper_index - 1
+            if pidx >= len(papers):
+                raise ValueError("paper_index out of range")
+            rec = papers[pidx]
+            doi = rec.doi or ""
+            if not doi:
+                return {
+                    "author_name": author_name,
+                    "candidate_index": candidate_index,
+                    "paper_index": paper_index,
+                    "title": rec.title,
+                    "count": 0,
+                    "references": [],
+                }
+            resolved = cli._resolve_references(doi, seed_record=rec)
+        else:
+            resolved = cli._resolve_references(doi)
+
+        return {
+            "doi": doi,
+            "title": resolved.get("title") or doi,
+            "source": resolved.get("source", ""),
+            "count": resolved.get("count", 0),
+            "references": resolved.get("references", []),
+        }
+
+    def saved_add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        engines = _parse_csv_list(args.get("engines"))
+        cli = self._runtime(engines)
+        collection = self._collection_name(args.get("collection"))
+        payload = self._resolve_record_payload(cli, args)
+        bucket = self._get_collection(collection)
+        key = self._record_key(payload)
+        if any(self._record_key(item) == key for item in bucket):
+            return {"collection": collection, "added": False, "reason": "already_present", "count": len(bucket), "paper": payload}
+        bucket.append(payload)
+        return {"collection": collection, "added": True, "count": len(bucket), "paper": payload}
+
+    def saved_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        collection = self._collection_name(args.get("collection"))
+        bucket = list(self._get_collection(collection))
+        return {"collection": collection, "count": len(bucket), "results": bucket}
+
+    def saved_remove(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        collection = self._collection_name(args.get("collection"))
+        doi = str(args.get("doi") or "").strip().lower()
+        title = str(args.get("title") or "").strip().lower()
+        if not doi and not title:
+            raise ValueError("doi or title is required")
+        bucket = self._get_collection(collection)
+        kept: List[Dict[str, Any]] = []
+        removed: Optional[Dict[str, Any]] = None
+        for item in bucket:
+            item_doi = str(item.get("doi") or "").strip().lower()
+            item_title = str(item.get("title") or "").strip().lower()
+            if removed is None and ((doi and item_doi == doi) or (title and item_title == title)):
+                removed = item
+                continue
+            kept.append(item)
+        self.saved_collections[collection] = kept
+        return {"collection": collection, "removed": bool(removed), "count": len(kept), "paper": removed}
+
+    def saved_clear(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        collection = self._collection_name(args.get("collection"))
+        removed = len(self._get_collection(collection))
+        self.saved_collections[collection] = []
+        return {"collection": collection, "cleared": True, "removed_count": removed, "count": 0}
+
+    def saved_export(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        engines = _parse_csv_list(args.get("engines"))
+        cli = self._runtime(engines)
+        collection = self._collection_name(args.get("collection"))
+        fmt = str(args.get("format") or "citations").strip().lower()
+        if fmt == "text":
+            fmt = "citations"
+        style = str(args.get("style") or "harvard").strip().lower() or "harvard"
+        include_refs = bool(args.get("include_references", False))
+        bucket = list(self._get_collection(collection))
+        recs = [
+            UnifiedRecord(
+                engine=str(item.get("engine") or ""),
+                title=str(item.get("title") or ""),
+                doi=str(item.get("doi") or ""),
+                year=str(item.get("year") or ""),
+                authors=str(item.get("authors") or ""),
+                venue=str(item.get("venue") or ""),
+                abstract=str(item.get("abstract") or ""),
+                url=str(item.get("url") or ""),
+                pdf_url=str(item.get("pdf_url") or ""),
+                raw_id=str(item.get("raw_id") or item.get("doi") or item.get("title") or ""),
+            )
+            for item in bucket
+        ]
+
+        if fmt == "bib":
+            content = "\n\n".join(cli._bibtex_entry(rec, i) for i, rec in enumerate(recs, start=1)) + ("\n" if recs else "")
+        elif fmt == "citations":
+            if style not in {"harvard", "apa", "ieee"}:
+                style = "harvard"
+            content = "\n".join(cli._citation_text(rec, style=style) for rec in recs) + ("\n" if recs else "")
+        elif fmt == "abstracts":
+            blocks: List[str] = []
+            for i, rec in enumerate(recs, start=1):
+                blocks.append(
+                    "\n".join(
+                        [
+                            "=" * 80,
+                            f"ITEM {i}",
+                            "=" * 80,
+                            f"Title: {rec.title or '-'}",
+                            f"Authors: {rec.authors or '-'}",
+                            f"Year: {rec.year or '-'}",
+                            f"Venue: {rec.venue or '-'}",
+                            f"DOI: {rec.doi or '-'}",
+                            f"Engine: {rec.engine or '-'}",
+                            f"URL: {rec.url or '-'}",
+                            f"PDF: {rec.pdf_url or '-'}",
+                            f"FullTextStatus: {cli._record_fulltext_status(rec).upper()}",
+                            "",
+                            "ABSTRACT",
+                            "-" * 80,
+                            rec.abstract or "(none)",
+                            "",
+                        ]
+                    )
+                )
+            content = "\n".join(blocks)
+        elif fmt == "fulltext":
+            blocks: List[str] = []
+            for i, rec in enumerate(recs, start=1):
+                resolved = cli._resolve_fulltext(rec.doi, seed_record=rec)
+                refs = cli._resolve_references(rec.doi, seed_record=rec) if include_refs and rec.doi else {"references": []}
+                sections = [
+                    "=" * 80,
+                    f"ITEM {i}",
+                    "=" * 80,
+                    f"Title: {rec.title or '-'}",
+                    f"Authors: {rec.authors or '-'}",
+                    f"Year: {rec.year or '-'}",
+                    f"Venue: {rec.venue or '-'}",
+                    f"DOI: {rec.doi or '-'}",
+                    f"Engine: {rec.engine or '-'}",
+                    f"URL: {rec.url or '-'}",
+                    f"PDF: {rec.pdf_url or '-'}",
+                    f"FullTextStatus: {cli._record_fulltext_status(rec).upper()}",
+                    "",
+                    "ABSTRACT",
+                    "-" * 80,
+                    rec.abstract or "(none)",
+                    "",
+                    "FULL TEXT",
+                    "-" * 80,
+                    str(resolved.get("text") or "(not available)"),
+                    "",
+                ]
+                if include_refs:
+                    sections.extend(["REFERENCES", "-" * 80])
+                    for ref in (refs.get("references") or []):
+                        line = ref.get("text") or ""
+                        if ref.get("doi"):
+                            line += f" | doi={ref['doi']}"
+                        sections.append(line)
+                    if not (refs.get("references") or []):
+                        sections.append("(none)")
+                    sections.append("")
+                blocks.append("\n".join(sections))
+            content = "\n".join(blocks)
+        else:
+            raise ValueError("format must be one of: bib, citations, abstracts, fulltext")
+
+        return {
+            "collection": collection,
+            "format": fmt,
+            "style": style,
+            "include_references": include_refs,
+            "count": len(recs),
+            "content": content,
+        }
+
+ENGINE_LIST = "elsevier, openalex, crossref, arxiv, europepmc, springer, semanticscholar"
+
 
 TOOLS = [
     {
         "name": "scholarfetch_search",
-        "description": "Unified scholarly search across enabled engines. Supports keyword, DOI, and person-name query routing. Returns deduplicated records.",
+        "description": "Start a research traversal from keywords, a DOI, or a person name. Returns deduplicated paper records that you can inspect, save, expand through references, or use as seeds for author exploration.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query, DOI, or person name."},
                 "limit": {"type": "integer", "description": "Max results (1-100).", "default": 20},
-                "engines": {"type": "string", "description": "Optional comma-separated engines, e.g. 'openalex,crossref,springer'."},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."},
             },
             "required": ["query"],
         },
     },
     {
         "name": "scholarfetch_doi_lookup",
-        "description": "Cross-engine DOI enrichment. Returns all matched records from enabled engines (metadata, abstract availability, links).",
+        "description": "Enrich one known DOI with metadata, reading links, and full-text availability signals. Use this after search, references, or external inputs when you already know the DOI.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "doi": {"type": "string"},
-                "engines": {"type": "string", "description": "Optional comma-separated engines."},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."},
             },
             "required": ["doi"],
         },
     },
     {
         "name": "scholarfetch_author_candidates",
-        "description": "Resolve and rank author identity candidates (OpenAlex-based), including works count/citations/affiliation for disambiguation.",
+        "description": "Disambiguate a human author name into ranked identity candidates. Use this before author_papers whenever the author name is ambiguous and you need a stable candidate_index for later calls.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
                 "limit": {"type": "integer", "default": 10},
-                "engines": {"type": "string", "description": "Optional comma-separated engines. Must include openalex."},
+                "engines": {"type": "string", "description": "Optional comma-separated subset of engines. Must include openalex."},
             },
             "required": ["name"],
         },
     },
     {
         "name": "scholarfetch_author_papers",
-        "description": "Fetch deduplicated papers for a selected author. Use either author_id directly or author_name + candidate_index.",
+        "description": "Expand one author into a deduplicated paper list. This is the main way to traverse from an author node to a paper node. Use author_id when you already know the exact author, or author_name plus candidate_index after author_candidates.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -285,13 +654,13 @@ TOOLS = [
                 "candidate_index": {"type": "integer", "default": 1},
                 "limit": {"type": "integer", "default": 50},
                 "filters": {"type": "string", "description": "Optional comma-separated filters: year>=YYYY, year<=YYYY, year=YYYY, has:abstract, has:doi, has:pdf, venue:<text>, title:<text>, doi:<text>"},
-                "engines": {"type": "string", "description": "Optional comma-separated engines. Must include openalex."},
+                "engines": {"type": "string", "description": "Optional comma-separated subset of engines. Must include openalex."},
             },
         },
     },
     {
         "name": "scholarfetch_abstract",
-        "description": "Retrieve best abstract by DOI OR via author workflow (author_name + candidate_index + paper_index).",
+        "description": "Read the best abstract available for a target paper. Use with a DOI or with author_name + candidate_index + paper_index after author_papers. Good for fast triage before saving or fetching full text.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -299,7 +668,99 @@ TOOLS = [
                 "author_name": {"type": "string"},
                 "candidate_index": {"type": "integer", "default": 1},
                 "paper_index": {"type": "integer", "default": 1},
-                "engines": {"type": "string", "description": "Optional comma-separated engines."},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."},
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_article_text",
+        "description": "Read full paper text when machine-readable content is recoverable. Use with a DOI or with author_name + candidate_index + paper_index. This is the main reading tool for agents building a literature corpus.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string"},
+                "author_name": {"type": "string"},
+                "candidate_index": {"type": "integer", "default": 1},
+                "paper_index": {"type": "integer", "default": 1},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_references",
+        "description": "Expand a paper into its references. Use with a DOI or with author_name + candidate_index + paper_index. This is the main edge-expansion tool for traversing the research tree from one paper into prior literature.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string"},
+                "author_name": {"type": "string"},
+                "candidate_index": {"type": "integer", "default": 1},
+                "paper_index": {"type": "integer", "default": 1},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_saved_add",
+        "description": "Add one paper to a named in-memory reading list on the MCP server. Best used with paper_json copied from previous tool results, but DOI, query+result_index, or author workflow are also supported. Use the same collection name across calls to build a session-level research set.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Optional reading-list name. Default: default."},
+                "paper_json": {"type": "string", "description": "Optional JSON object for one paper record returned by another ScholarFetch tool."},
+                "doi": {"type": "string"},
+                "query": {"type": "string"},
+                "result_index": {"type": "integer", "default": 1},
+                "author_name": {"type": "string"},
+                "candidate_index": {"type": "integer", "default": 1},
+                "paper_index": {"type": "integer", "default": 1},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_saved_list",
+        "description": "List all papers currently saved in a named in-memory reading list. Use this to inspect the agent's working set before exporting or removing items.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Optional reading-list name. Default: default."}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_saved_remove",
+        "description": "Remove one paper from a named in-memory reading list by DOI or exact title. Use after review when a candidate is no longer relevant.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Optional reading-list name. Default: default."},
+                "doi": {"type": "string"},
+                "title": {"type": "string"}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_saved_clear",
+        "description": "Clear all papers from a named in-memory reading list. Use when restarting a research branch or ending a session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Optional reading-list name. Default: default."}
+            },
+        },
+    },
+    {
+        "name": "scholarfetch_saved_export",
+        "description": "Export the current reading list as citations, abstracts, BibTeX, or an aggregated full-text corpus. This is the handoff tool for downstream synthesis agents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection": {"type": "string", "description": "Optional reading-list name. Default: default."},
+                "format": {"type": "string", "description": "One of: citations, abstracts, bib, fulltext.", "default": "citations"},
+                "style": {"type": "string", "description": "For citations only: harvard, apa, ieee.", "default": "harvard"},
+                "include_references": {"type": "boolean", "description": "When format=fulltext, include the reference lists too.", "default": False},
+                "engines": {"type": "string", "description": f"Optional comma-separated subset of: {ENGINE_LIST}."}
             },
         },
     },
@@ -320,6 +781,20 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return SERVICE.author_papers(args)
     if name == "scholarfetch_abstract":
         return SERVICE.abstract(args)
+    if name == "scholarfetch_article_text":
+        return SERVICE.article_text(args)
+    if name == "scholarfetch_references":
+        return SERVICE.references(args)
+    if name == "scholarfetch_saved_add":
+        return SERVICE.saved_add(args)
+    if name == "scholarfetch_saved_list":
+        return SERVICE.saved_list(args)
+    if name == "scholarfetch_saved_remove":
+        return SERVICE.saved_remove(args)
+    if name == "scholarfetch_saved_clear":
+        return SERVICE.saved_clear(args)
+    if name == "scholarfetch_saved_export":
+        return SERVICE.saved_export(args)
     raise ValueError(f"Unknown tool: {name}")
 
 
