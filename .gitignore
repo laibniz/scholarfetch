@@ -8,5 +8,7 @@ huggingface/
 .scholarfetch.env
 .scholarfetch_settings.json
 .scholarfetch_credentials.json
+.mcpregistry_github_token
+.mcpregistry_registry_token
 
 .elsevier_cli.env
