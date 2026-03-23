@@ -22,7 +22,7 @@ from scholarfetch_cli import ElsevierClient, RetroCLI, UnifiedRecord
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "scholarfetch-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 
 
 def _safe_int(value: Any, default: int, min_v: int, max_v: int) -> int:

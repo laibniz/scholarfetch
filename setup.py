@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name="scholarfetch",
-    version="0.2.0",
+    version="0.2.1",
     description="Multi-engine scholarly fetch CLI and MCP server",
     py_modules=["scholarfetch_cli", "scholarfetch", "scholarfetch_mcp", "scholarfetch_fastmcp"],
     entry_points={
